@@ -30,9 +30,12 @@
   // Error state
   let error = $state<string | null>(null);
 
-  // Viewport query state (async — populated via effect below)
-  let points = $state<TimelinePoint[]>([]);
-  let segments = $state<TimelinePath[]>([]);
+  // Viewport query state (async — populated via effect below).
+  // $state.raw, not $state: these hold hundreds of thousands of entries and are
+  // only ever replaced wholesale, while $state would wrap every point in a
+  // reactive proxy and make the draw loop read them through it.
+  let points = $state.raw<TimelinePoint[]>([]);
+  let segments = $state.raw<TimelinePath[]>([]);
   let mapBounds = $state<MapBoundsRect | null>(null);
 
   let mapView = $state<ReturnType<typeof MapView>>();
