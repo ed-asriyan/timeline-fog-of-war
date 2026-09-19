@@ -8,6 +8,7 @@
   import AddressSearch from './presentation/components/AddressSearch.svelte';
   import MapView, { type MapBoundsRect } from './presentation/MapView.svelte';
   import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './presentation/scale';
+  import { getSegmentCoverageKey } from './domains/map/grid';
   import { getSharedFiles } from './utils/share-target';
   import type { Map as MapApp } from './domains/map/app';
   import type { MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
@@ -41,6 +42,10 @@
 
   let mapView = $state<ReturnType<typeof MapView>>();
 
+  // What the data currently on screen was queried for. Plain, not $state: the
+  // query effect both reads and writes it.
+  let appliedQuery = '';
+
   // Query viewport data using the service (async)
   $effect(() => {
     const bounds = mapBounds;
@@ -56,6 +61,7 @@
     if (fogPixelRadius(settings.radius, vp.viewport.lat, vp.viewport.zoom) < MIN_VISIBLE_PIXEL_RADIUS) {
       points = [];
       segments = [];
+      appliedQuery = '';
       return;
     }
 
@@ -78,11 +84,22 @@
           },
         };
 
+        // Most pans and every radius change land on the same segments, and the
+        // path settings are the only other thing getData() reads.
+        const queryKey = [
+          getSegmentCoverageKey(queryBounds),
+          settings.pathLengthKm,
+          settings.pathVelocityKmh,
+          files.dataVersion,
+        ].join('|');
+        if (queryKey === appliedQuery) return;
+
         const resultData = await mapApp.getData(queryBounds);
 
         if (!cancelled) {
           points = resultData.points;
           segments = resultData.paths;
+          appliedQuery = queryKey;
         }
       } catch (err: any) {
         if (!cancelled) {

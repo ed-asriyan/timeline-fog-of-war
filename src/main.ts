@@ -4,6 +4,7 @@ import 'leaflet/dist/leaflet.css'
 import './index.css'
 import { registerSW } from 'virtual:pwa-register'
 import { analytics } from './infrastructure/analytics'
+import { CachedMapSegmentRepository } from './infrastructure/repositories/CachedMapSegmentRepository'
 import { IndexedDbMapSegmentRepository } from './infrastructure/repositories/IndexedDbMapSegmentRepository'
 import { MapSettingsRepository } from './infrastructure/repositories/MapSettingsRepository'
 import { Map as MapApp } from './domains/map/app'
@@ -42,7 +43,9 @@ if ('serviceWorker' in navigator) {
 }
 
 // Create infrastructure and application objects, then render
-IndexedDbMapSegmentRepository.openDb().then(mapSegmentRepository => {
+IndexedDbMapSegmentRepository.openDb().then(store => {
+  // Panning the map asks for segments it just had; keep them in memory.
+  const mapSegmentRepository = new CachedMapSegmentRepository(store);
   const mapSettingsRepository = new MapSettingsRepository();
 
   const parser = new TimelineParserFactory();
