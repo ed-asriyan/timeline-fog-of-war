@@ -1,10 +1,11 @@
 import { MapSegmentRepository, MapSegment, TimelinePoint, TimelinePath } from "../../domains/map/ports";
+import { PathDeduplicator, PointDeduplicator } from "../../domains/map/dedup";
 import { getSegmentIdForPoints, getSegmentIdsForPath } from "../../domains/map/grid";
 
 export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
     private static readonly dbName = 'TimelineMapDB';
     private static readonly storeName = 'MapSegments';
-    static dbVersion = 2;
+    static dbVersion = 3;
 
     private db: IDBDatabase;
 
@@ -111,8 +112,18 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 req.onerror = () => reject(req.error);
             });
 
-        const allPoints: TimelinePoint[] = allRecords.flatMap(r => r.points ?? []);
-        const allPaths: TimelinePath[] = allRecords.flatMap(r => r.paths ?? []);
+        // Everything imported before the near-duplicate filtering existed is
+        // put through it once here. Paths are stored once per segment they
+        // cross, so this also collapses those copies back into one path.
+        const seenPoints = new PointDeduplicator();
+        const allPoints: TimelinePoint[] = allRecords
+            .flatMap(r => r.points ?? [])
+            .filter(point => seenPoints.add(point));
+
+        const seenPaths = new PathDeduplicator();
+        const allPaths: TimelinePath[] = allRecords
+            .flatMap(r => r.paths ?? [])
+            .filter(path => seenPaths.add(path));
 
         const pointsBySegment = getSegmentIdForPoints(allPoints);
 
@@ -157,7 +168,9 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 if (oldVersion < 1) {
                     db.createObjectStore(this.storeName, { keyPath: 'id' });
                 }
-                if (oldVersion >= 1 && oldVersion < 2) {
+                if (oldVersion >= 1 && oldVersion < 3) {
+                    // v2 re-segmented the data, v3 drops near-duplicates;
+                    // both are the same full re-write.
                     needsMigration = true;
                 }
             };
