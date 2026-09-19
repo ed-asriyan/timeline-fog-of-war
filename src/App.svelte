@@ -11,8 +11,7 @@
   import { getSegmentCoverageKey } from './domains/map/grid';
   import { getDetailLevel } from './domains/map/lod';
   import { getSharedFiles } from './utils/share-target';
-  import type { Map as MapApp } from './domains/map/app';
-  import type { MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
+  import type { MapApp, MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
 
   let {
     mapApp,

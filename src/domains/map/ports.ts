@@ -39,7 +39,8 @@ export interface Settings {
 }
 
 export interface MapApp {
-  loadPoints(data: string, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null>;
+  /** A Blob is read where the import runs, which keeps a large file off the page. */
+  loadPoints(data: string | Blob, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null>;
   clear(): Promise<void>;
   /**
    * `resolutionKm` is how much ground one screen pixel covers: detail finer

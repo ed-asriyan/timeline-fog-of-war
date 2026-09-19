@@ -4,6 +4,7 @@ import 'leaflet/dist/leaflet.css'
 import './index.css'
 import { registerSW } from 'virtual:pwa-register'
 import { analytics } from './infrastructure/analytics'
+import { WorkerImportMapApp } from './infrastructure/import/WorkerImportMapApp'
 import { CachedMapSegmentRepository } from './infrastructure/repositories/CachedMapSegmentRepository'
 import { IndexedDbMapSegmentRepository } from './infrastructure/repositories/IndexedDbMapSegmentRepository'
 import { MapSettingsRepository } from './infrastructure/repositories/MapSettingsRepository'
@@ -49,7 +50,12 @@ IndexedDbMapSegmentRepository.openDb().then(store => {
   const mapSettingsRepository = new MapSettingsRepository();
 
   const parser = new TimelineParserFactory();
-  const mapApp = new MapApp(mapSegmentRepository, parser, mapSettingsRepository);
+  // Imports run in a worker with a connection of their own, so what the cache
+  // holds has to go once one finishes.
+  const mapApp = new WorkerImportMapApp(
+    new MapApp(mapSegmentRepository, parser, mapSettingsRepository),
+    () => mapSegmentRepository.forgetAll(),
+  );
 
   mount(App, {
     target: document.getElementById('root')!,

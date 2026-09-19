@@ -71,9 +71,14 @@ export class CachedMapSegmentRepository implements MapSegmentRepository {
     }
 
     async clear(): Promise<void> {
+        this.forgetAll();
+        await this.inner.clear();
+    }
+
+    /** Drops everything held, for when the store was written from elsewhere. */
+    forgetAll(): void {
         this.cache.clear();
         this.entries = 0;
-        await this.inner.clear();
     }
 
     async hasData(): Promise<boolean> {

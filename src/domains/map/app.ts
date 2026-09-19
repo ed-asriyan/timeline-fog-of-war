@@ -35,8 +35,8 @@ export class Map implements MapApp {
     await this.settings.saveSettings(settings);
   }
 
-  async loadPoints(data: string, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null> {
-    const group = this.parser.parse(data);
+  async loadPoints(data: string | Blob, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null> {
+    const group = this.parser.parse(typeof data === 'string' ? data : await data.text());
 
     let _last: TimelinePoint | null = null;
     for (const p of group.points) {
