@@ -13,6 +13,7 @@
   import L from 'leaflet';
   import type { TimelinePoint, TimelinePath } from '../domains/map/ports';
   import type { FogSettings } from '../infrastructure/repositories/UISettingsRepository';
+  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './scale';
 
   interface MapViewport {
     lat: number;
@@ -64,12 +65,9 @@
     ctx.fillStyle = 'rgba(0, 0, 0, 1)';
 
     const center = map.getCenter();
-    const metersPerPixel =
-      (40075016.686 * Math.abs(Math.cos((center.lat * Math.PI) / 180))) /
-      Math.pow(2, map.getZoom() + 8);
-    const pixelRadius = (settings.radius * 1000) / metersPerPixel;
+    const pixelRadius = fogPixelRadius(settings.radius, center.lat, map.getZoom());
 
-    if (pixelRadius < 0.5) {
+    if (pixelRadius < MIN_VISIBLE_PIXEL_RADIUS) {
       ctx.globalCompositeOperation = 'source-over';
       return;
     }

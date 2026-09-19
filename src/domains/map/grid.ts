@@ -4,7 +4,6 @@ export const LAT_STEP_COUNTS: number = 1800;
 export const LON_STEP_COUNTS: number = 3600;
 
 export function getSegmentIdsForBound(bounds: Bounds): number[] {
-  const ids = new Set<number>();
   const minLat = Math.min(bounds.a.lat, bounds.b.lat);
   const maxLat = Math.max(bounds.a.lat, bounds.b.lat);
   const minLon = Math.min(bounds.a.lon, bounds.b.lon);
@@ -25,13 +24,19 @@ export function getSegmentIdsForBound(bounds: Bounds): number[] {
   if (startLonIndex < 0) startLonIndex = 0;
   if (endLonIndex < 0) endLonIndex = 0;
 
+  // Every (latIndex, lonIndex) pair in the rectangle maps to its own id, so the
+  // list needs no de-duplication: fill an array of the known size instead of
+  // going through a Set, which for a zoomed-out view means millions of entries.
+  const ids: number[] = new Array((endLatIndex - startLatIndex + 1) * (endLonIndex - startLonIndex + 1));
+  let next = 0;
   for (let latIndex = startLatIndex; latIndex <= endLatIndex; latIndex++) {
+    const rowStart = latIndex * LON_STEP_COUNTS;
     for (let lonIndex = startLonIndex; lonIndex <= endLonIndex; lonIndex++) {
-      ids.add(latIndex * LON_STEP_COUNTS + lonIndex);
+      ids[next++] = rowStart + lonIndex;
     }
   }
 
-  return Array.from(ids);
+  return ids;
 }
 
 export function getSegmentIdForPoint(point: TimelinePoint): number {

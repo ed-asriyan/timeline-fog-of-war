@@ -7,6 +7,7 @@
   import SidePanel from './presentation/components/SidePanel.svelte';
   import AddressSearch from './presentation/components/AddressSearch.svelte';
   import MapView, { type MapBoundsRect } from './presentation/MapView.svelte';
+  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './presentation/scale';
   import { getSharedFiles } from './utils/share-target';
   import type { Map as MapApp } from './domains/map/app';
   import type { MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
@@ -48,6 +49,16 @@
     files.dataVersion;
 
     if (!bounds) return;
+
+    // Zoomed far enough out the fog circles are smaller than a pixel and the
+    // overlay draws nothing at all. Querying for it would walk the whole grid
+    // (the world is 6.5M segments) to produce data nobody can see.
+    if (fogPixelRadius(settings.radius, vp.viewport.lat, vp.viewport.zoom) < MIN_VISIBLE_PIXEL_RADIUS) {
+      points = [];
+      segments = [];
+      return;
+    }
+
     let cancelled = false;
 
     const query = async () => {
