@@ -1,11 +1,12 @@
 import { MapSegmentRepository, MapSegment, TimelinePoint, TimelinePath } from "../../domains/map/ports";
 import { PathDeduplicator, PointDeduplicator } from "../../domains/map/dedup";
 import { getSegmentIdForPoints, getSegmentIdsForPath } from "../../domains/map/grid";
+import { StoredSegment, decodeSegment, encodeSegment } from "./SegmentRecord";
 
 export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
     private static readonly dbName = 'TimelineMapDB';
     private static readonly storeName = 'MapSegments';
-    static dbVersion = 3;
+    static dbVersion = 4;
 
     private db: IDBDatabase;
 
@@ -26,12 +27,7 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
             tx.onabort = () => reject(tx.error || new Error('Transaction aborted'));
 
             for (const segment of segments) {
-                const record = {
-                    id: segment.index,
-                    points: segment.group.points.map(p => ({ lat: p.lat, lon: p.lon, timestamp: p.timestamp })),
-                    paths: segment.group.paths.map(p => ({ points: p.points.map(pt => ({ lat: pt.lat, lon: pt.lon, timestamp: pt.timestamp })) })),
-                };
-                store.put(record);
+                store.put(encodeSegment(segment));
             }
         });
     }
@@ -56,12 +52,9 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 req.onsuccess = (event) => {
                     const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
                     if (cursor) {
-                        const record = cursor.value;
+                        const record = cursor.value as StoredSegment;
                         if (idSet.has(record.id)) {
-                            foundById.set(record.id, {
-                                index: record.id,
-                                group: { points: record.points ?? [], paths: record.paths ?? [] }
-                            });
+                            foundById.set(record.id, decodeSegment(record));
                         }
                         cursor.continue();
                     }
@@ -70,12 +63,9 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 for (const id of ids) {
                     const req = store.get(id);
                     req.onsuccess = () => {
-                        const record = req.result;
+                        const record = req.result as StoredSegment | undefined;
                         if (record) {
-                            foundById.set(id, {
-                                index: record.id,
-                                group: { points: record.points ?? [], paths: record.paths ?? [] }
-                            });
+                            foundById.set(id, decodeSegment(record));
                         }
                     };
                 }
@@ -104,25 +94,28 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
     }
 
     private async reprocessAllData(): Promise<void> {
-        const allRecords: Array<{ id: number; points: TimelinePoint[]; paths: TimelinePath[] }> =
-            await new Promise((resolve, reject) => {
-                const tx = this.db.transaction(IndexedDbMapSegmentRepository.storeName, 'readonly');
-                const req = tx.objectStore(IndexedDbMapSegmentRepository.storeName).getAll();
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
+        const allRecords: StoredSegment[] = await new Promise((resolve, reject) => {
+            const tx = this.db.transaction(IndexedDbMapSegmentRepository.storeName, 'readonly');
+            const req = tx.objectStore(IndexedDbMapSegmentRepository.storeName).getAll();
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+
+        // decodeSegment reads both the current record and the one written
+        // before segments were stored as typed arrays.
+        const all = allRecords.map(decodeSegment);
 
         // Everything imported before the near-duplicate filtering existed is
         // put through it once here. Paths are stored once per segment they
         // cross, so this also collapses those copies back into one path.
         const seenPoints = new PointDeduplicator();
-        const allPoints: TimelinePoint[] = allRecords
-            .flatMap(r => r.points ?? [])
+        const allPoints: TimelinePoint[] = all
+            .flatMap(segment => segment.group.points)
             .filter(point => seenPoints.add(point));
 
         const seenPaths = new PathDeduplicator();
-        const allPaths: TimelinePath[] = allRecords
-            .flatMap(r => r.paths ?? [])
+        const allPaths: TimelinePath[] = all
+            .flatMap(segment => segment.group.paths)
             .filter(path => seenPaths.add(path));
 
         const pointsBySegment = getSegmentIdForPoints(allPoints);
@@ -145,11 +138,13 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
             const store = tx.objectStore(IndexedDbMapSegmentRepository.storeName);
             store.clear();
             for (const segmentId of allSegmentIds) {
-                store.put({
-                    id: segmentId,
-                    points: pointsBySegment[segmentId] ?? [],
-                    paths: pathsBySegment[segmentId] ?? [],
-                });
+                store.put(encodeSegment({
+                    index: segmentId,
+                    group: {
+                        points: pointsBySegment[segmentId] ?? [],
+                        paths: pathsBySegment[segmentId] ?? [],
+                    },
+                }));
             }
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
@@ -168,9 +163,10 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 if (oldVersion < 1) {
                     db.createObjectStore(this.storeName, { keyPath: 'id' });
                 }
-                if (oldVersion >= 1 && oldVersion < 3) {
-                    // v2 re-segmented the data, v3 drops near-duplicates;
-                    // both are the same full re-write.
+                if (oldVersion >= 1 && oldVersion < 4) {
+                    // v2 re-segmented the data, v3 dropped near-duplicates and
+                    // v4 changed the record layout; all are the same full
+                    // re-write, so one pass covers however far behind we are.
                     needsMigration = true;
                 }
             };
