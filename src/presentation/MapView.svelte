@@ -14,6 +14,7 @@
   import type { TimelinePoint, TimelinePath } from '../domains/map/ports';
   import type { FogSettings } from '../infrastructure/repositories/UISettingsRepository';
   import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './scale';
+  import { mercatorScale, mercatorX, mercatorY } from './mercator';
 
   interface MapViewport {
     lat: number;
@@ -67,10 +68,17 @@
     const center = map.getCenter();
     const pixelRadius = fogPixelRadius(settings.radius, center.lat, map.getZoom());
 
-    if (pixelRadius < MIN_VISIBLE_PIXEL_RADIUS) {
+    // Project here rather than through map.latLngToContainerPoint(), which
+    // allocates a LatLng and a Point on every one of a few hundred thousand
+    // calls. getPixelBounds().min is the same origin it subtracts.
+    const origin = map.getPixelBounds().min;
+    if (pixelRadius < MIN_VISIBLE_PIXEL_RADIUS || !origin) {
       ctx.globalCompositeOperation = 'source-over';
       return;
     }
+    const scale = mercatorScale(map.getZoom());
+    const originX = origin.x;
+    const originY = origin.y;
 
     // Draw roads (data is pre-filtered by grid query)
     if (settings.connectPaths) {
@@ -87,12 +95,16 @@
         // if we still want to filter by path length
 
         ctx.beginPath();
-        const startPt = map.latLngToContainerPoint([segment.points[0].lat, segment.points[0].lon]);
-        ctx.moveTo(startPt.x, startPt.y);
+        ctx.moveTo(
+          mercatorX(segment.points[0].lon, scale) - originX,
+          mercatorY(segment.points[0].lat, scale) - originY,
+        );
 
         for (let i = 1; i < segment.points.length; i++) {
-          const p = map.latLngToContainerPoint([segment.points[i].lat, segment.points[i].lon]);
-          ctx.lineTo(p.x, p.y);
+          ctx.lineTo(
+            mercatorX(segment.points[i].lon, scale) - originX,
+            mercatorY(segment.points[i].lat, scale) - originY,
+          );
         }
         ctx.stroke();
       }
@@ -101,9 +113,10 @@
     // Draw points (data is pre-filtered by grid query)
     ctx.beginPath();
     for (const point of points) {
-      const pt = map.latLngToContainerPoint([point.lat, point.lon]);
-      ctx.moveTo(pt.x + pixelRadius, pt.y);
-      ctx.arc(pt.x, pt.y, pixelRadius, 0, Math.PI * 2);
+      const x = mercatorX(point.lon, scale) - originX;
+      const y = mercatorY(point.lat, scale) - originY;
+      ctx.moveTo(x + pixelRadius, y);
+      ctx.arc(x, y, pixelRadius, 0, Math.PI * 2);
     }
     ctx.fill();
 
