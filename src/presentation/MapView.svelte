@@ -38,6 +38,9 @@
     onBoundsChange?: (bounds: MapBoundsRect) => void;
   } = $props();
 
+  /** How many paths go into one stroke() call. */
+  const PATHS_PER_STROKE = 10000;
+
   let mapContainer: HTMLDivElement;
   let canvas: HTMLCanvasElement;
   let map: L.Map | null = null;
@@ -82,10 +85,17 @@
 
     // Draw roads (data is pre-filtered by grid query)
     if (settings.connectPaths) {
-      ctx.beginPath();
       ctx.lineWidth = pixelRadius * 2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
+
+      // Paths are drawn in batches rather than one stroke each: moveTo starts
+      // a new subpath, and erasing the same pixel twice with an opaque colour
+      // is the same as erasing it once, so the result is identical for a
+      // fraction of the calls into the rasteriser. The batch is capped so a
+      // dense viewport does not build one enormous path.
+      let batched = 0;
+      ctx.beginPath();
 
       for (const segment of segments) {
         // The new TimelinePath format provides a list of points
@@ -94,7 +104,6 @@
         // Note: Here we could manually calculate the total distance of all segments
         // if we still want to filter by path length
 
-        ctx.beginPath();
         ctx.moveTo(
           mercatorX(segment.points[0].lon, scale) - originX,
           mercatorY(segment.points[0].lat, scale) - originY,
@@ -106,8 +115,15 @@
             mercatorY(segment.points[i].lat, scale) - originY,
           );
         }
-        ctx.stroke();
+
+        if (++batched >= PATHS_PER_STROKE) {
+          ctx.stroke();
+          ctx.beginPath();
+          batched = 0;
+        }
       }
+
+      if (batched > 0) ctx.stroke();
     }
 
     // Draw points (data is pre-filtered by grid query)
