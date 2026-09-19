@@ -1,12 +1,11 @@
-import { MapSegmentRepository, MapSegment, TimelinePoint, TimelinePath } from "../../domains/map/ports";
-import { PathDeduplicator, PointDeduplicator } from "../../domains/map/dedup";
-import { getSegmentIdForPoints, getSegmentIdsForPath } from "../../domains/map/grid";
+import { MapSegmentRepository, MapSegment } from "../../domains/map/ports";
+import { buildDetailLevels, getLevelForSegmentId } from "../../domains/map/lod";
 import { StoredSegment, decodeSegment, encodeSegment } from "./SegmentRecord";
 
 export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
     private static readonly dbName = 'TimelineMapDB';
     private static readonly storeName = 'MapSegments';
-    static dbVersion = 4;
+    static dbVersion = 5;
 
     private db: IDBDatabase;
 
@@ -102,49 +101,27 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
         });
 
         // decodeSegment reads both the current record and the one written
-        // before segments were stored as typed arrays.
-        const all = allRecords.map(decodeSegment);
+        // before segments were stored as typed arrays. Level 0 holds
+        // everything; the coarser levels are rebuilt from it below.
+        const source = allRecords
+            .map(decodeSegment)
+            .filter(segment => getLevelForSegmentId(segment.index) === 0);
 
-        // Everything imported before the near-duplicate filtering existed is
-        // put through it once here. Paths are stored once per segment they
+        // Re-segmenting, dropping near-duplicates and filling the levels of
+        // detail are all the same pass: paths are stored once per segment they
         // cross, so this also collapses those copies back into one path.
-        const seenPoints = new PointDeduplicator();
-        const allPoints: TimelinePoint[] = all
-            .flatMap(segment => segment.group.points)
-            .filter(point => seenPoints.add(point));
-
-        const seenPaths = new PathDeduplicator();
-        const allPaths: TimelinePath[] = all
-            .flatMap(segment => segment.group.paths)
-            .filter(path => seenPaths.add(path));
-
-        const pointsBySegment = getSegmentIdForPoints(allPoints);
-
-        const pathsBySegment: Record<number, TimelinePath[]> = {};
-        for (const path of allPaths) {
-            for (const segmentId of getSegmentIdsForPath(path)) {
-                if (!pathsBySegment[segmentId]) pathsBySegment[segmentId] = [];
-                pathsBySegment[segmentId].push(path);
-            }
-        }
-
-        const allSegmentIds = new Set([
-            ...Object.keys(pointsBySegment).map(Number),
-            ...Object.keys(pathsBySegment).map(Number),
-        ]);
+        const rebuilt = buildDetailLevels(
+            source.flatMap(segment => segment.group.points),
+            source.flatMap(segment => segment.group.paths),
+        );
 
         await new Promise<void>((resolve, reject) => {
             const tx = this.db.transaction(IndexedDbMapSegmentRepository.storeName, 'readwrite');
             const store = tx.objectStore(IndexedDbMapSegmentRepository.storeName);
             store.clear();
-            for (const segmentId of allSegmentIds) {
-                store.put(encodeSegment({
-                    index: segmentId,
-                    group: {
-                        points: pointsBySegment[segmentId] ?? [],
-                        paths: pathsBySegment[segmentId] ?? [],
-                    },
-                }));
+            for (const key of Object.keys(rebuilt)) {
+                const storedId = Number(key);
+                store.put(encodeSegment({ index: storedId, group: rebuilt[storedId] }));
             }
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
@@ -163,10 +140,11 @@ export class IndexedDbMapSegmentRepository implements MapSegmentRepository {
                 if (oldVersion < 1) {
                     db.createObjectStore(this.storeName, { keyPath: 'id' });
                 }
-                if (oldVersion >= 1 && oldVersion < 4) {
-                    // v2 re-segmented the data, v3 dropped near-duplicates and
-                    // v4 changed the record layout; all are the same full
-                    // re-write, so one pass covers however far behind we are.
+                if (oldVersion >= 1 && oldVersion < 5) {
+                    // v2 re-segmented the data, v3 dropped near-duplicates, v4
+                    // changed the record layout and v5 added the coarser levels
+                    // of detail; all are the same full re-write, so one pass
+                    // covers however far behind the store is.
                     needsMigration = true;
                 }
             };

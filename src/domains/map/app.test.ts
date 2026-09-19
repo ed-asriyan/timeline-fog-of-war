@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Map as MapApp } from './app';
+import { calculateDistance } from './geometry';
 import {
   Group,
   MapSegment,
@@ -10,6 +11,7 @@ import {
   TimelinePoint,
 } from './ports';
 import { getSegmentIdForPoint } from './grid';
+import { DETAIL_LEVELS, getLevelForSegmentId } from './lod';
 
 /** ~11 m and ~33 m in degrees of latitude, either side of the 20 m threshold. */
 const CLOSE_DEG = 0.0001;
@@ -48,17 +50,22 @@ class MemorySegmentRepository implements MapSegmentRepository {
     return this.stored.size > 0;
   }
 
-  allPoints(): TimelinePoint[] {
-    return [...this.stored.values()].flatMap(segment => segment.group.points);
+  /** Level 0 is the data as imported; coarser levels are thinned copies. */
+  allPoints(level = 0): TimelinePoint[] {
+    return this.atLevel(level).flatMap(segment => segment.group.points);
   }
 
-  pathCount(): number {
+  pathCount(level = 0): number {
     // Paths are copied into every segment they cross; count each one once.
     return new Set(
-      [...this.stored.values()].flatMap(segment =>
+      this.atLevel(level).flatMap(segment =>
         segment.group.paths.map(path => JSON.stringify(path.points)),
       ),
     ).size;
+  }
+
+  private atLevel(level: number) {
+    return [...this.stored.values()].filter(segment => getLevelForSegmentId(segment.index) === level);
   }
 }
 
@@ -153,6 +160,32 @@ describe('Map.loadPoints', () => {
     expect([...segments.stored.values()].every(s => s.group.points.length + s.group.paths.length > 0)).toBe(true);
   });
 
+  it('thins the data into a copy per level of detail', async () => {
+    // 60 points in a 600 m line: 20 m apart, so every level keeps fewer.
+    const points = Array.from({ length: 60 }, (_, i) => point(47.62 + i * 2 * CLOSE_DEG, -122.35, minutes(i)));
+    await load({ points, paths: [] });
+
+    const kept = DETAIL_LEVELS.map((_, level) => segments.allPoints(level).length);
+
+    expect(kept[0]).toBe(60);
+    for (let level = 1; level < kept.length; level++) {
+      expect(kept[level]).toBeLessThan(kept[level - 1]);
+      expect(kept[level]).toBeGreaterThan(0);
+    }
+  });
+
+  it('keeps every level at least its own spacing apart', async () => {
+    const points = Array.from({ length: 60 }, (_, i) => point(47.62 + i * 2 * CLOSE_DEG, -122.35, minutes(i)));
+    await load({ points, paths: [] });
+
+    for (let level = 0; level < DETAIL_LEVELS.length; level++) {
+      const kept = segments.allPoints(level).sort((a, b) => a.lat - b.lat);
+      for (let i = 1; i < kept.length; i++) {
+        expect(calculateDistance(kept[i - 1], kept[i])).toBeGreaterThanOrEqual(DETAIL_LEVELS[level]);
+      }
+    }
+  });
+
   it('still reports the most recent location of the import', async () => {
     const last = await load({
       points: [point(47.62, -122.35, minutes(10)), point(47.62 + CLOSE_DEG, -122.35, minutes(20))],
@@ -208,6 +241,21 @@ describe('Map.getData', () => {
 
     expect(getSegmentIdForPoint(start)).not.toBe(getSegmentIdForPoint(end));
     expect((await app.getData(bounds)).paths).toHaveLength(1);
+  });
+
+  it('reads a coarser copy when a pixel covers more ground', async () => {
+    // 60 points 20 m apart along 600 m of road.
+    const points = Array.from({ length: 60 }, (_, i) => point(47.62 + i * 2 * CLOSE_DEG, -122.35, minutes(i)));
+    await app.loadPoints(JSON.stringify({ points, paths: [] }));
+
+    const detailed = await app.getData(bounds, 0);
+    const coarse = await app.getData(bounds, DETAIL_LEVELS[1]);
+    const coarsest = await app.getData(bounds, DETAIL_LEVELS[DETAIL_LEVELS.length - 1]);
+
+    expect(detailed.points).toHaveLength(60);
+    expect(coarse.points.length).toBeLessThan(detailed.points.length);
+    expect(coarsest.points.length).toBeLessThanOrEqual(coarse.points.length);
+    expect(coarsest.points.length).toBeGreaterThan(0);
   });
 
   it('counts the same things in the statistics', async () => {

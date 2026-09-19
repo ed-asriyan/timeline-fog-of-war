@@ -7,8 +7,9 @@
   import SidePanel from './presentation/components/SidePanel.svelte';
   import AddressSearch from './presentation/components/AddressSearch.svelte';
   import MapView, { type MapBoundsRect } from './presentation/MapView.svelte';
-  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './presentation/scale';
+  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius, metersPerPixel } from './presentation/scale';
   import { getSegmentCoverageKey } from './domains/map/grid';
+  import { getDetailLevel } from './domains/map/lod';
   import { getSharedFiles } from './utils/share-target';
   import type { Map as MapApp } from './domains/map/app';
   import type { MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
@@ -65,6 +66,10 @@
       return;
     }
 
+    // How much ground one pixel covers, which is the finest detail worth
+    // reading: anything closer together than that lands on the same pixel.
+    const resolutionKm = metersPerPixel(vp.viewport.lat, vp.viewport.zoom) / 1000;
+
     let cancelled = false;
 
     const query = async () => {
@@ -88,13 +93,14 @@
         // path settings are the only other thing getData() reads.
         const queryKey = [
           getSegmentCoverageKey(queryBounds),
+          getDetailLevel(resolutionKm),
           settings.pathLengthKm,
           settings.pathVelocityKmh,
           files.dataVersion,
         ].join('|');
         if (queryKey === appliedQuery) return;
 
-        const resultData = await mapApp.getData(queryBounds);
+        const resultData = await mapApp.getData(queryBounds, resolutionKm);
 
         if (!cancelled) {
           points = resultData.points;
