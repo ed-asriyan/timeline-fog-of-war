@@ -7,9 +7,11 @@
   import SidePanel from './presentation/components/SidePanel.svelte';
   import AddressSearch from './presentation/components/AddressSearch.svelte';
   import MapView, { type MapBoundsRect } from './presentation/MapView.svelte';
+  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius, metersPerPixel } from './presentation/scale';
+  import { getSegmentCoverageKey } from './domains/map/grid';
+  import { getDetailLevel } from './domains/map/lod';
   import { getSharedFiles } from './utils/share-target';
-  import type { Map as MapApp } from './domains/map/app';
-  import type { MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
+  import type { MapApp, MapSegmentRepository, TimelinePoint, TimelinePath } from './domains/map/ports';
 
   let {
     mapApp,
@@ -30,12 +32,19 @@
   // Error state
   let error = $state<string | null>(null);
 
-  // Viewport query state (async — populated via effect below)
-  let points = $state<TimelinePoint[]>([]);
-  let segments = $state<TimelinePath[]>([]);
+  // Viewport query state (async — populated via effect below).
+  // $state.raw, not $state: these hold hundreds of thousands of entries and are
+  // only ever replaced wholesale, while $state would wrap every point in a
+  // reactive proxy and make the draw loop read them through it.
+  let points = $state.raw<TimelinePoint[]>([]);
+  let segments = $state.raw<TimelinePath[]>([]);
   let mapBounds = $state<MapBoundsRect | null>(null);
 
   let mapView = $state<ReturnType<typeof MapView>>();
+
+  // What the data currently on screen was queried for. Plain, not $state: the
+  // query effect both reads and writes it.
+  let appliedQuery = '';
 
   // Query viewport data using the service (async)
   $effect(() => {
@@ -45,6 +54,21 @@
     files.dataVersion;
 
     if (!bounds) return;
+
+    // Zoomed far enough out the fog circles are smaller than a pixel and the
+    // overlay draws nothing at all. Querying for it would walk the whole grid
+    // (the world is 6.5M segments) to produce data nobody can see.
+    if (fogPixelRadius(settings.radius, vp.viewport.lat, vp.viewport.zoom) < MIN_VISIBLE_PIXEL_RADIUS) {
+      points = [];
+      segments = [];
+      appliedQuery = '';
+      return;
+    }
+
+    // How much ground one pixel covers, which is the finest detail worth
+    // reading: anything closer together than that lands on the same pixel.
+    const resolutionKm = metersPerPixel(vp.viewport.lat, vp.viewport.zoom) / 1000;
+
     let cancelled = false;
 
     const query = async () => {
@@ -64,11 +88,23 @@
           },
         };
 
-        const resultData = await mapApp.getData(queryBounds);
+        // Most pans and every radius change land on the same segments, and the
+        // path settings are the only other thing getData() reads.
+        const queryKey = [
+          getSegmentCoverageKey(queryBounds),
+          getDetailLevel(resolutionKm),
+          settings.pathLengthKm,
+          settings.pathVelocityKmh,
+          files.dataVersion,
+        ].join('|');
+        if (queryKey === appliedQuery) return;
+
+        const resultData = await mapApp.getData(queryBounds, resolutionKm);
 
         if (!cancelled) {
           points = resultData.points;
           segments = resultData.paths;
+          appliedQuery = queryKey;
         }
       } catch (err: any) {
         if (!cancelled) {

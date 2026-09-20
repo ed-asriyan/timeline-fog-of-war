@@ -12,8 +12,9 @@ import {
   SettingsRepository,
 } from "./ports";
 import { calculateDistance } from './geometry';
-import { PathDeduplicator, PointDeduplicator } from './dedup';
+import { PathDeduplicator } from './dedup';
 import { getSegmentIdsForBound, getSegmentIdsForPath, getSegmentIdForPoints } from './grid';
+import { DETAIL_LEVELS, buildDetailLevels, getDetailLevel, getSegmentIdForLevel } from './lod';
 
 export class Map implements MapApp {
   private parser: ParserPort;
@@ -34,8 +35,8 @@ export class Map implements MapApp {
     await this.settings.saveSettings(settings);
   }
 
-  async loadPoints(data: string, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null> {
-    const group = this.parser.parse(data);
+  async loadPoints(data: string | Blob, onProgress?: (status: 'parsing'|'saving', progress: number) => void): Promise<LocationPoint | null> {
+    const group = this.parser.parse(typeof data === 'string' ? data : await data.text());
 
     let _last: TimelinePoint | null = null;
     for (const p of group.points) {
@@ -50,61 +51,47 @@ export class Map implements MapApp {
 
     // A path is stored in every segment it crosses, so keep its segment ids
     // alongside it: which segments to touch is only known after the geometry.
+    // The ids are the same at every level of detail, only the record differs.
     const pathSegmentIds = group.paths.map(path => getSegmentIdsForPath(path));
-    const pointsBySegment = getSegmentIdForPoints(group.points);
 
-    // Get all unique segment IDs that we need to update
-    const allSegmentIds = new Set(Object.keys(pointsBySegment).map(Number));
+    const touchedSegmentIds = new Set(Object.keys(getSegmentIdForPoints(group.points)).map(Number));
     for (const segmentIds of pathSegmentIds) {
-      for (const segmentId of segmentIds) allSegmentIds.add(segmentId);
+      for (const segmentId of segmentIds) touchedSegmentIds.add(segmentId);
+    }
+
+    // Read every level in one go rather than a round trip per level.
+    const idsToLoad: number[] = [];
+    for (let level = 0; level < DETAIL_LEVELS.length; level++) {
+      for (const segmentId of touchedSegmentIds) idsToLoad.push(getSegmentIdForLevel(level, segmentId));
     }
 
     onProgress?.('saving', 10);
-    const loadedSegments = await this.segments.loadSegments(Array.from(allSegmentIds));
+    const loadedSegments = await this.segments.loadSegments(idsToLoad);
     // Keyed by id rather than a global Map, which this class shadows.
     const segmentById: Record<number, MapSegment> = {};
     for (const segment of loadedSegments) segmentById[segment.index] = segment;
-    const changedSegments = new Set<number>();
 
     // Near-duplicates carry no information for the fog, so they are dropped on
-    // import rather than stored and re-filtered on every viewport query. Both
-    // deduplicators are seeded with what is already stored, so re-importing an
-    // overlapping export adds nothing.
-    const seenPaths = new PathDeduplicator();
-    for (const segment of loadedSegments) {
-      for (const path of segment.group.paths) seenPaths.add(path);
-    }
+    // import rather than stored and re-filtered on every viewport query. The
+    // builder is given what is already stored at each level, so re-importing
+    // an overlapping export adds nothing.
+    const additions = buildDetailLevels(group.points, group.paths, {
+      pathSegmentIds,
+      seedSegmentIds: touchedSegmentIds,
+      existing: storedId => segmentById[storedId]?.group,
+      onProgress: fraction => onProgress?.('saving', 10 + fraction * 80),
+    });
 
-    for (let i = 0; i < group.paths.length; i++) {
-      if (i % 1000 === 0) onProgress?.('saving', 10 + (i / group.paths.length) * 40);
-      const path = group.paths[i];
-      if (!seenPaths.add(path)) continue;
+    const changedSegments = new Set<number>();
+    for (const key of Object.keys(additions)) {
+      const storedId = Number(key);
+      const segment = segmentById[storedId];
+      const gained = additions[storedId];
+      if (!segment || (gained.points.length === 0 && gained.paths.length === 0)) continue;
 
-      for (const segmentId of pathSegmentIds[i]) {
-        const segment = segmentById[segmentId];
-        if (!segment) continue;
-        segment.group.paths.push(path);
-        changedSegments.add(segmentId);
-      }
-    }
-
-    // Points live in exactly one segment, so they are de-duplicated per
-    // segment and the index is thrown away as soon as the segment is done.
-    const segmentIdsWithPoints = Object.keys(pointsBySegment).map(Number);
-    for (let i = 0; i < segmentIdsWithPoints.length; i++) {
-      if (i % 100 === 0) onProgress?.('saving', 50 + (i / segmentIdsWithPoints.length) * 40);
-      const segmentId = segmentIdsWithPoints[i];
-      const segment = segmentById[segmentId];
-      if (!segment) continue;
-
-      const seenPoints = new PointDeduplicator();
-      for (const point of segment.group.points) seenPoints.add(point);
-
-      for (const point of pointsBySegment[segmentId]) {
-        if (!seenPoints.add(point)) continue;
-        segment.group.points.push(point);
-        changedSegments.add(segmentId);
-      }
+      for (const point of gained.points) segment.group.points.push(point);
+      for (const path of gained.paths) segment.group.paths.push(path);
+      changedSegments.add(storedId);
     }
 
     await this.segments.saveSegments(loadedSegments.filter(segment => changedSegments.has(segment.index)));
@@ -117,15 +104,19 @@ export class Map implements MapApp {
     await this.segments.clear();
   }
 
-  async getData(bounds: Bounds): Promise<{ points: TimelinePoint[]; paths: TimelinePath[] }> {
-    const segmentIds = getSegmentIdsForBound(bounds);
+  async getData(bounds: Bounds, resolutionKm: number = 0): Promise<{ points: TimelinePoint[]; paths: TimelinePath[] }> {
+    // Reading a coarser copy where the finer one would land on the same pixels
+    // is the difference between a few thousand points and a few hundred
+    // thousand; below the finest spacing this is level 0, the data as imported.
+    const level = getDetailLevel(resolutionKm);
+    const segmentIds = getSegmentIdsForBound(bounds).map(id => getSegmentIdForLevel(level, id));
     const settings = await this.settings.loadSettings();
     const points: TimelinePoint[] = [];
     const paths: TimelinePath[] = [];
     // Every segment holds a full copy of the paths crossing it, so the same
     // path comes back once per segment it touches. Points need no such pass:
     // each one lives in a single segment and is filtered on import.
-    const seenPaths = new PathDeduplicator();
+    const seenPaths = new PathDeduplicator(DETAIL_LEVELS[level]);
 
     const segments = await this.segments.loadSegments(segmentIds);
     for (const segment of segments) {
@@ -180,7 +171,8 @@ export class Map implements MapApp {
   }
 
   async getStatistics(bounds: Bounds): Promise<Statistics> {
-    const segmentIds = getSegmentIdsForBound(bounds);
+    // Level 0: statistics count what was imported, not what a zoom level draws.
+    const segmentIds = getSegmentIdsForBound(bounds).map(id => getSegmentIdForLevel(0, id));
     let totalPoints = 0;
     let totalPaths = 0;
 

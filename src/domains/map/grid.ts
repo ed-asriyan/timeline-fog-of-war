@@ -3,35 +3,59 @@ import { Bounds, TimelinePoint } from "./ports";
 export const LAT_STEP_COUNTS: number = 1800;
 export const LON_STEP_COUNTS: number = 3600;
 
-export function getSegmentIdsForBound(bounds: Bounds): number[] {
-  const ids = new Set<number>();
+interface SegmentIndexRange {
+  startLatIndex: number;
+  endLatIndex: number;
+  startLonIndex: number;
+  endLonIndex: number;
+}
+
+function clampIndex(index: number, count: number): number {
+  if (index >= count) return count - 1;
+  if (index < 0) return 0;
+  return index;
+}
+
+function getSegmentIndexRange(bounds: Bounds): SegmentIndexRange {
   const minLat = Math.min(bounds.a.lat, bounds.b.lat);
   const maxLat = Math.max(bounds.a.lat, bounds.b.lat);
   const minLon = Math.min(bounds.a.lon, bounds.b.lon);
   const maxLon = Math.max(bounds.a.lon, bounds.b.lon);
 
-  let startLatIndex = Math.floor((minLat + 90) * 10);
-  let endLatIndex = Math.floor((maxLat + 90) * 10);
-  let startLonIndex = Math.floor((minLon + 180) * 10);
-  let endLonIndex = Math.floor((maxLon + 180) * 10);
+  return {
+    startLatIndex: clampIndex(Math.floor((minLat + 90) * 10), LAT_STEP_COUNTS),
+    endLatIndex: clampIndex(Math.floor((maxLat + 90) * 10), LAT_STEP_COUNTS),
+    startLonIndex: clampIndex(Math.floor((minLon + 180) * 10), LON_STEP_COUNTS),
+    endLonIndex: clampIndex(Math.floor((maxLon + 180) * 10), LON_STEP_COUNTS),
+  };
+}
 
-  if (startLatIndex >= LAT_STEP_COUNTS) startLatIndex = LAT_STEP_COUNTS - 1;
-  if (endLatIndex >= LAT_STEP_COUNTS) endLatIndex = LAT_STEP_COUNTS - 1;
-  if (startLonIndex >= LON_STEP_COUNTS) startLonIndex = LON_STEP_COUNTS - 1;
-  if (endLonIndex >= LON_STEP_COUNTS) endLonIndex = LON_STEP_COUNTS - 1;
+/**
+ * Identifies the set of segments a rectangle covers. Two rectangles with the
+ * same key hold exactly the same data, which lets a caller skip repeating a
+ * query after a pan too small to reach another segment.
+ */
+export function getSegmentCoverageKey(bounds: Bounds): string {
+  const { startLatIndex, endLatIndex, startLonIndex, endLonIndex } = getSegmentIndexRange(bounds);
+  return `${startLatIndex}:${endLatIndex}:${startLonIndex}:${endLonIndex}`;
+}
 
-  if (startLatIndex < 0) startLatIndex = 0;
-  if (endLatIndex < 0) endLatIndex = 0;
-  if (startLonIndex < 0) startLonIndex = 0;
-  if (endLonIndex < 0) endLonIndex = 0;
+export function getSegmentIdsForBound(bounds: Bounds): number[] {
+  const { startLatIndex, endLatIndex, startLonIndex, endLonIndex } = getSegmentIndexRange(bounds);
 
+  // Every (latIndex, lonIndex) pair in the rectangle maps to its own id, so the
+  // list needs no de-duplication: fill an array of the known size instead of
+  // going through a Set, which for a zoomed-out view means millions of entries.
+  const ids: number[] = new Array((endLatIndex - startLatIndex + 1) * (endLonIndex - startLonIndex + 1));
+  let next = 0;
   for (let latIndex = startLatIndex; latIndex <= endLatIndex; latIndex++) {
+    const rowStart = latIndex * LON_STEP_COUNTS;
     for (let lonIndex = startLonIndex; lonIndex <= endLonIndex; lonIndex++) {
-      ids.add(latIndex * LON_STEP_COUNTS + lonIndex);
+      ids[next++] = rowStart + lonIndex;
     }
   }
 
-  return Array.from(ids);
+  return ids;
 }
 
 export function getSegmentIdForPoint(point: TimelinePoint): number {

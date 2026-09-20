@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { IndexedDbMapSegmentRepository } from './IndexedDbMapSegmentRepository';
 import { getSegmentIdForPoint } from '../../domains/map/grid';
+import { DETAIL_LEVELS, getSegmentIdForLevel } from '../../domains/map/lod';
 import { TimelinePath, TimelinePoint } from '../../domains/map/ports';
 
 const DB_NAME = 'TimelineMapDB';
@@ -98,5 +99,40 @@ describe('IndexedDbMapSegmentRepository migration', () => {
     // Still stored in both segments it crosses, but only once in each.
     expect(segments.map(s => s.group.paths.length)).toEqual([1, 1]);
     expect(segments.flatMap(s => s.group.points)).toHaveLength(2);
+  });
+});
+
+describe('IndexedDbMapSegmentRepository levels of detail', () => {
+  let opened: IndexedDbMapSegmentRepository[] = [];
+
+  beforeEach(async () => {
+    await deleteDb();
+  });
+
+  afterEach(() => {
+    for (const repo of opened) (repo as unknown as { db: IDBDatabase }).db.close();
+    opened = [];
+  });
+
+  it('fills the coarser levels from data that predates them', async () => {
+    // 60 points 20 m apart, written the old way with no levels at all.
+    const points = Array.from({ length: 60 }, (_, i) => point(47.62 + i * 2 * CLOSE_DEG, -122.35, T0 + i * 60_000));
+    const segmentId = getSegmentIdForPoint(points[0]);
+    await seedLegacyDb([{ id: segmentId, points, paths: [] }]);
+
+    const repo = await IndexedDbMapSegmentRepository.openDb();
+    opened.push(repo);
+
+    const kept: number[] = [];
+    for (let level = 0; level < DETAIL_LEVELS.length; level++) {
+      const [segment] = await repo.loadSegments([getSegmentIdForLevel(level, segmentId)]);
+      kept.push(segment.group.points.length);
+    }
+
+    expect(kept[0]).toBe(60);
+    for (let level = 1; level < kept.length; level++) {
+      expect(kept[level]).toBeLessThan(kept[level - 1]);
+      expect(kept[level]).toBeGreaterThan(0);
+    }
   });
 });

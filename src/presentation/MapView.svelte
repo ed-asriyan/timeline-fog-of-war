@@ -13,6 +13,8 @@
   import L from 'leaflet';
   import type { TimelinePoint, TimelinePath } from '../domains/map/ports';
   import type { FogSettings } from '../infrastructure/repositories/UISettingsRepository';
+  import { MIN_VISIBLE_PIXEL_RADIUS, fogPixelRadius } from './scale';
+  import { mercatorScale, mercatorX, mercatorY } from './mercator';
 
   interface MapViewport {
     lat: number;
@@ -35,6 +37,9 @@
     onViewportChange: (lat: number, lng: number, zoom: number) => void;
     onBoundsChange?: (bounds: MapBoundsRect) => void;
   } = $props();
+
+  /** How many paths go into one stroke() call. */
+  const PATHS_PER_STROKE = 10000;
 
   let mapContainer: HTMLDivElement;
   let canvas: HTMLCanvasElement;
@@ -64,22 +69,33 @@
     ctx.fillStyle = 'rgba(0, 0, 0, 1)';
 
     const center = map.getCenter();
-    const metersPerPixel =
-      (40075016.686 * Math.abs(Math.cos((center.lat * Math.PI) / 180))) /
-      Math.pow(2, map.getZoom() + 8);
-    const pixelRadius = (settings.radius * 1000) / metersPerPixel;
+    const pixelRadius = fogPixelRadius(settings.radius, center.lat, map.getZoom());
 
-    if (pixelRadius < 0.5) {
+    // Project here rather than through map.latLngToContainerPoint(), which
+    // allocates a LatLng and a Point on every one of a few hundred thousand
+    // calls. getPixelBounds().min is the same origin it subtracts.
+    const origin = map.getPixelBounds().min;
+    if (pixelRadius < MIN_VISIBLE_PIXEL_RADIUS || !origin) {
       ctx.globalCompositeOperation = 'source-over';
       return;
     }
+    const scale = mercatorScale(map.getZoom());
+    const originX = origin.x;
+    const originY = origin.y;
 
     // Draw roads (data is pre-filtered by grid query)
     if (settings.connectPaths) {
-      ctx.beginPath();
       ctx.lineWidth = pixelRadius * 2;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
+
+      // Paths are drawn in batches rather than one stroke each: moveTo starts
+      // a new subpath, and erasing the same pixel twice with an opaque colour
+      // is the same as erasing it once, so the result is identical for a
+      // fraction of the calls into the rasteriser. The batch is capped so a
+      // dense viewport does not build one enormous path.
+      let batched = 0;
+      ctx.beginPath();
 
       for (const segment of segments) {
         // The new TimelinePath format provides a list of points
@@ -88,24 +104,35 @@
         // Note: Here we could manually calculate the total distance of all segments
         // if we still want to filter by path length
 
-        ctx.beginPath();
-        const startPt = map.latLngToContainerPoint([segment.points[0].lat, segment.points[0].lon]);
-        ctx.moveTo(startPt.x, startPt.y);
+        ctx.moveTo(
+          mercatorX(segment.points[0].lon, scale) - originX,
+          mercatorY(segment.points[0].lat, scale) - originY,
+        );
 
         for (let i = 1; i < segment.points.length; i++) {
-          const p = map.latLngToContainerPoint([segment.points[i].lat, segment.points[i].lon]);
-          ctx.lineTo(p.x, p.y);
+          ctx.lineTo(
+            mercatorX(segment.points[i].lon, scale) - originX,
+            mercatorY(segment.points[i].lat, scale) - originY,
+          );
         }
-        ctx.stroke();
+
+        if (++batched >= PATHS_PER_STROKE) {
+          ctx.stroke();
+          ctx.beginPath();
+          batched = 0;
+        }
       }
+
+      if (batched > 0) ctx.stroke();
     }
 
     // Draw points (data is pre-filtered by grid query)
     ctx.beginPath();
     for (const point of points) {
-      const pt = map.latLngToContainerPoint([point.lat, point.lon]);
-      ctx.moveTo(pt.x + pixelRadius, pt.y);
-      ctx.arc(pt.x, pt.y, pixelRadius, 0, Math.PI * 2);
+      const x = mercatorX(point.lon, scale) - originX;
+      const y = mercatorY(point.lat, scale) - originY;
+      ctx.moveTo(x + pixelRadius, y);
+      ctx.arc(x, y, pixelRadius, 0, Math.PI * 2);
     }
     ctx.fill();
 

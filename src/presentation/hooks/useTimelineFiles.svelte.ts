@@ -28,11 +28,10 @@ export function createTimelineFiles(
       let lastPoint: { lat: number; lon: number } | null = null;
       for (const file of fileList) {
         loadingState = { status: 'reading', progress: (filesProcessed / fileList.length) * 100 };
-        const text = await file.text();
 
         const baseProgress = (filesProcessed / fileList.length) * 100;
         const fileShare = (1 / fileList.length) * 100;
-        const point = await mapApp.loadPoints(text, (status, p) => {
+        const point = await mapApp.loadPoints(file, (status, p) => {
           // p is 0-100 for the current file phase
           // Wait, 'saving' goes from 10 to 100, we can just say:
           if (status === 'saving') {
